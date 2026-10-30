@@ -1,6 +1,6 @@
-# Superstock Edge 0.3.1
+# Superstock Edge 0.4.0
 
-A free-first, research-only stock discovery scanner inspired by the Superstocks methodology. Version 0.3.1 adds an automatic Magic Line laboratory and an entry/stop/target planning engine.
+A free-first, research-only stock discovery scanner inspired by the Superstocks methodology. Version 0.4.0 scans real index universes instead of a hand-typed watchlist and rebuilds the interface around that workflow.
 
 - Repository: <https://github.com/700vimal-arch/SuperstockEdge>
 - Stack: Python, Streamlit, pandas, Plotly, yfinance
@@ -10,7 +10,7 @@ A free-first, research-only stock discovery scanner inspired by the Superstocks 
 
 ## What it does
 
-- Scans Indian (`.NS`, `.BO`) and US symbols for weekly trend, variable-length bases, relative volume and volatility contraction
+- Scans NIFTY 500, S&P 500 and NASDAQ-100 constituents, or your own watchlist, for weekly trend, variable-length bases, relative volume and volatility contraction
 - Selects a Magic Line per stock from several candidate weekly averages instead of a hard-coded one
 - Produces an entry zone, a structural stop with cited candidates, technical and fundamental targets, and reward/risk bands
 - Scores candidates on separate fundamental, technical and entry dimensions
@@ -60,7 +60,7 @@ pip install -r requirements.txt
 python -m pytest -q
 ```
 
-Expected: `28 passed`. If tests are not run, do not treat the environment as verified.
+Expected: `39 passed`. If tests are not run, do not treat the environment as verified.
 
 ### 5. Run the app
 
@@ -78,21 +78,35 @@ If macOS blocks the script, run `chmod +x launch_mac.command` once, or launch it
 
 ## Using the app
 
+Pick a universe in the sidebar first. The **Symbols per scan** control caps how many constituents are sampled (evenly across the list) so a 500-name index stays practical; choose **All** to scan everything.
+
 | Workspace | Purpose |
 | --- | --- |
-| Market overview | Watchlist scan summary and ranked opportunity view |
-| Discovery scanner | Ranked scan with score slider, classification filter and CSV export |
+| Market overview | Run a scan and see coverage, actionable setup cards, classification mix and score leaders |
+| Discovery scanner | Filter the last scan by search, score, classification and actionability, with CSV export |
 | Magic Line lab | Candidate comparison, selected line, rationale and historical support tests |
-| Stock analysis | Weekly chart, structural detail and a full trade plan for one symbol |
+| Stock analysis | Weekly chart, trade plan, fundamentals and raw data for one symbol |
 | Backtesting lab | Single-symbol weekly research approximation |
-| Watchlist & data | Cached files, cache clearing and data notes |
+| Watchlist & data | Custom watchlist, constituent snapshots, cache clearing and data notes |
 
-The first scan downloads one CSV per symbol and can take a while; later runs read the cache. Tick **Refresh downloaded data** in the sidebar to bypass it, or clear the cache from **Watchlist & data**.
+A scan works in two phases: every symbol gets the price-only technical pass, then fundamentals are fetched only for the top 25 by opportunity score. The first run downloads one CSV per symbol and can take a while; later runs read the cache. Tick **Refresh prices from provider** in the sidebar to bypass the cache, press **Refresh constituents** to re-pull the index list, or clear prices from **Watchlist & data**.
+
+## Universes
+
+| Universe | Source | Symbols |
+| --- | --- | --- |
+| NIFTY 500 | Wikipedia NIFTY 500 constituent table | 500, with the `.NS` suffix |
+| S&P 500 | Wikipedia S&P 500 constituent table | ~503, with `.` rewritten to `-` for Yahoo (`BRK.B` → `BRK-B`) |
+| NASDAQ-100 | Wikipedia NASDAQ-100 constituent table | ~101 |
+| Custom watchlist | `storage/watchlist.txt` | whatever is on the file |
+
+Constituent lists are cached for `universe.cache_ttl_days` (default 7) under `storage/cache/universe/`. If the network fails, the saved snapshot is used and labelled `stale_cache`; if there is no snapshot, the app reports the error instead of guessing. The **Market filter** still narrows a mixed list to Indian or US tickers. Index membership is current, not point-in-time, so historical backtests remain approximate.
 
 ## Configuration
 
 All tunables live in `config/settings.yaml`:
 
+- universe caching, scan cap and download batching
 - watchlist defaults per market
 - minimum history, base length and base range
 - quiet-entry volume / ATR thresholds
@@ -102,6 +116,16 @@ All tunables live in `config/settings.yaml`:
 - risk and backtest defaults
 
 The live symbol list is `storage/watchlist.txt` (created from the config defaults on first run). One symbol per line; `#` starts a comment. Indian symbols need the `.NS` or `.BO` suffix, US symbols use the plain ticker.
+
+Universe settings:
+
+```yaml
+universe:
+  cache_ttl_days: 7       # constituent snapshot lifetime
+  max_scan_symbols: 500   # intended ceiling for a scan
+  batch_size: 50          # symbols per batched price download
+  fundamentals_top_n: 25  # fundamentals are fetched only for this many leaders
+```
 
 Magic Line settings:
 
@@ -180,9 +204,11 @@ Fundamental and technical targets are shown separately. The primary target is th
 ## Data and caching
 
 - Prices come from Yahoo Finance with `auto_adjust=True`; the displayed price is an adjusted historical close, not an executable quote.
+- Symbols without a cache are downloaded in batches (`batch_size`) with `yf.download`, then retried one by one if the batch misses them.
 - Each download is cached as CSV in `storage/cache/`, keyed by symbol, period and interval.
-- Streamlit caches loaded frames for 15 minutes in-process.
-- The cache is disposable: delete the folder, use **Watchlist & data**, or tick **Refresh downloaded data**.
+- Index constituents are snapshotted as JSON in `storage/cache/universe/` and fall back to the last snapshot when the source is unreachable.
+- Streamlit caches loaded frames for a few hours in-process.
+- The cache is disposable: delete the folder, use **Watchlist & data**, or tick **Refresh prices from provider**.
 - Fundamentals are a best-effort snapshot and are not point-in-time.
 
 ## Troubleshooting
@@ -194,7 +220,13 @@ The virtual environment is not active. Re-run `source .venv/bin/activate` (macOS
 Check the ticker and suffix: `RELIANCE.NS` for India, `AAPL` for the US. Delisted, renamed or thinly traded symbols may be missing. Try a shorter period (`2y`) or a different symbol.
 
 **Yahoo Finance errors, timeouts or empty scans**
-Free endpoints rate-limit and occasionally fail. Wait a few minutes, retry with fewer symbols, and avoid ticking **Refresh downloaded data** repeatedly. Cached symbols keep working while the provider is unavailable.
+Free endpoints rate-limit and occasionally fail. Wait a few minutes, retry with fewer symbols, and avoid ticking **Refresh prices from provider** repeatedly. Cached symbols keep working while the provider is unavailable.
+
+**Universe is empty or says `error`**
+The constituent list is pulled from a public index page. Check the internet connection, press **Refresh constituents**, and confirm the table layout on the source page has not changed. A previously saved snapshot keeps working offline; clear `storage/cache/universe/` only if you want to force a fresh pull.
+
+**A large scan is slow**
+The first pass downloads history for every uncached symbol. Reduce **Symbols per scan**, reuse the cache, or keep `batch_size` at 50 unless the provider is stable.
 
 **SSL certificate errors on macOS**
 Install the Python certificate bundle, then retry:
@@ -226,24 +258,28 @@ python -m pytest -q          # full suite
 ./run_tests.sh               # activates .venv and runs the suite
 ```
 
-The suite covers weekly aggregation, structural analysis, Magic Line selection and as-of behaviour, entry-plan construction, scoring and the backtest harness.
+The suite covers weekly aggregation, structural analysis, Magic Line selection and as-of behaviour, entry-plan construction, scoring, the backtest harness, universe loading and the batched price cache.
 
 ## Project structure
 
-- `data/market_data.py` — price and fundamentals adapters with CSV caching
+- `data/universe.py` — index constituent loaders, symbol normalisation and snapshot caching
+- `data/market_data.py` — price and fundamentals adapters with CSV caching and batched downloads
 - `engine/technicals.py` — weekly bars, base/MA/volume/quiet-entry/exit analysis
 - `engine/magic_line.py` — candidate evaluation, support-test scoring and selection
 - `engine/entry_plan.py` — setup classification, entry zone, stop candidates, targets and reward/risk
 - `engine/backtest.py` — weekly single-symbol test harness
 - `engine/fundamentals.py` — quarterly statement helper
+- `ui/theme.py` — design tokens, global CSS and HTML building blocks
+- `ui/charts.py` — Plotly weekly, Magic Line, equity and distribution charts
 - `app.py` — Streamlit interface
-- `config/settings.yaml` — scanner, Magic Line, entry-plan, risk and backtest settings
-- `storage/` — watchlist and downloaded price cache (not tracked)
+- `config/settings.yaml` — universe, scanner, Magic Line, entry-plan, risk and backtest settings
+- `storage/` — watchlist and downloaded price/constituent cache (not tracked)
 - `tests/` — automated tests
 
 ## Limitations
 
 - Yahoo Finance is best-effort and not a guaranteed live feed.
+- Index membership is current, not point-in-time; the S&P 500 and NASDAQ-100 lists are US-only and the NIFTY 500 list depends on a public wiki table. Constituent pages can change format, and a scan samples the list rather than covering it exhaustively unless **All** is selected.
 - OHLCV is requested with `auto_adjust=True`; the displayed price is an adjusted historical close, not an executable quote.
 - Current company fundamentals are not point-in-time.
 - Fundamental targets annualize one quarter and may be distorted by seasonality or one-off items. They are not forecasts.

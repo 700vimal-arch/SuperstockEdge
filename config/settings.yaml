@@ -1,13 +1,19 @@
 app:
   name: Superstock Edge
-  version: 0.3.1
+  version: 0.4.0
   timezone: Asia/Kolkata
+
+universe:
+  cache_ttl_days: 7
+  max_scan_symbols: 500
+  batch_size: 50
+  fundamentals_top_n: 25
 
 markets:
   india:
     currency: INR
     suffix: .NS
-    symbols: [RELIANCE.NS, TRENT.NS, KAYNES.NS, DIXON.NS, BSE.NS, ZOMATO.NS]
+    symbols: [RELIANCE.NS, TRENT.NS, KAYNES.NS, DIXON.NS, BSE.NS, ETERNAL.NS]
   us:
     currency: USD
     symbols: [AAPL, NVDA, PLTR, APP, HOOD, SOFI]

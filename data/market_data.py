@@ -32,8 +32,7 @@ def _clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def fetch_ohlcv(symbol: str, period: str = "5y", interval: str = "1d", refresh: bool = False) -> tuple[pd.DataFrame, dict]:
-    safe = symbol.replace("/", "_").replace("^", "IDX_")
-    path = CACHE / f"{safe}_{period}_{interval}.csv"
+    path = cache_path(symbol, period, interval)
     if path.exists() and not refresh:
         try:
             df = _clean_ohlcv(pd.read_csv(path, index_col=0, parse_dates=True))
@@ -59,6 +58,74 @@ def fetch_ohlcv(symbol: str, period: str = "5y", interval: str = "1d", refresh: 
         return pd.DataFrame(), {"source": "Yahoo Finance", "status": "error",
                                 "retrieved_utc": datetime.now(timezone.utc).isoformat(),
                                 "message": str(exc)}
+
+
+def cache_path(symbol: str, period: str = "5y", interval: str = "1d") -> Path:
+    safe = symbol.replace("/", "_").replace("^", "IDX_")
+    return CACHE / f"{safe}_{period}_{interval}.csv"
+
+
+def prefetch_ohlcv(
+    symbols: list[str],
+    period: str = "5y",
+    interval: str = "1d",
+    refresh: bool = False,
+    chunk_size: int = 50,
+    progress=None,
+) -> dict:
+    """Warm the CSV cache for many symbols using batched provider requests.
+
+    Cached symbols are skipped. A failing batch is retried one symbol at a time so
+    a single bad ticker does not discard the rest of the chunk.
+    """
+    symbols = list(dict.fromkeys(symbols))
+    todo = symbols if refresh else [s for s in symbols if not cache_path(s, period, interval).exists()]
+    downloaded: list[str] = []
+    failed: list[str] = []
+    total = max(1, len(todo))
+    done = 0
+
+    def report(label: str) -> None:
+        if progress:
+            progress(done, len(todo), label)
+
+    report("Starting download")
+    for start in range(0, len(todo), max(1, chunk_size)):
+        chunk = todo[start:start + max(1, chunk_size)]
+        try:
+            raw = yf.download(chunk, period=period, interval=interval, auto_adjust=True,
+                              progress=False, threads=True, group_by="ticker")
+        except Exception:
+            raw = None
+        for symbol in chunk:
+            frame = None
+            if raw is not None and not raw.empty:
+                try:
+                    frame = raw[symbol] if symbol in getattr(raw.columns, "levels", [[]])[0] else raw
+                except (KeyError, IndexError):
+                    frame = None
+            clean = _clean_ohlcv(frame)
+            if clean.empty:
+                failed.append(symbol)
+            else:
+                clean.to_csv(cache_path(symbol, period, interval))
+                downloaded.append(symbol)
+            done += 1
+            report(symbol)
+
+    for symbol in list(failed):
+        frame, meta = fetch_ohlcv(symbol, period, interval, refresh=True)
+        if not frame.empty:
+            failed.remove(symbol)
+            downloaded.append(symbol)
+            report(f"{symbol} retried")
+
+    return {
+        "requested": len(symbols),
+        "cached": len(symbols) - len(todo),
+        "downloaded": downloaded,
+        "failed": failed,
+    }
 
 
 def fetch_fundamentals(symbol: str) -> tuple[dict, dict]:
