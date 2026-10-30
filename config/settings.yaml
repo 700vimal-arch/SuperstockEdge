@@ -1,0 +1,42 @@
+app:
+  name: Superstock Edge
+  version: 0.2.0
+  timezone: Asia/Kolkata
+
+markets:
+  india:
+    currency: INR
+    suffix: .NS
+    symbols: [RELIANCE.NS, TRENT.NS, KAYNES.NS, DIXON.NS, BSE.NS, ZOMATO.NS]
+  us:
+    currency: USD
+    symbols: [AAPL, NVDA, PLTR, APP, HOOD, SOFI]
+
+scanner:
+  minimum_history_weeks: 40
+  base_min_weeks: 10
+  base_max_weeks: 26
+  base_max_range_pct: 35
+  volume_expansion_multiple: 2.0
+  quiet_volume_multiple: 0.75
+  quiet_atr_multiple: 0.85
+  quiet_magic_distance_pct: 5.0
+  magic_line_method: "10W EMA"
+  magic_break_buffer_pct: 2.0
+  extended_threshold_pct: 60
+  parabolic_runup_40w_pct: 100
+  parabolic_extension_pct: 35
+  max_trailing_pe: 40
+  earnings_wait_weeks: 2
+
+risk:
+  risk_per_trade_pct: 0.5
+  max_position_pct: 10
+  max_portfolio_risk_pct: 3
+  atr_stop_multiple: 2.0
+
+backtest:
+  initial_capital: 100000
+  commission_bps: 10
+  slippage_bps: 10
+  max_positions: 10
