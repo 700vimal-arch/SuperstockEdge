@@ -1,6 +1,6 @@
 app:
   name: Superstock Edge
-  version: 0.2.0
+  version: 0.3.1
   timezone: Asia/Kolkata
 
 markets:
@@ -21,13 +21,39 @@ scanner:
   quiet_volume_multiple: 0.75
   quiet_atr_multiple: 0.85
   quiet_magic_distance_pct: 5.0
-  magic_line_method: "10W EMA"
   magic_break_buffer_pct: 2.0
   extended_threshold_pct: 60
   parabolic_runup_40w_pct: 100
   parabolic_extension_pct: 35
   max_trailing_pe: 40
   earnings_wait_weeks: 2
+  magic_line:
+    auto_select: true
+    forced_method: null
+    candidates: ["10W SMA", "10W EMA", "20W SMA", "20W EMA"]
+    min_tests: 3
+    min_resolved_tests: 2
+    min_successes: 1
+    min_defined_bars: 30
+    test_tolerance_pct: 2.5
+    test_close_tolerance_pct: 1.5
+    min_separation_weeks: 4
+    recovery_window_weeks: 4
+    recovery_threshold_pct: 3.0
+    breakdown_buffer_pct: 2.0
+  entry:
+    zone_width_pct: 2.5
+    max_entry_distance_pct: 8.0
+    swing_lookback_weeks: 8
+    atr_stop_multiple: 2.0
+    min_stop_atr: 0.75
+    stop_buffer_atr: 0.25
+    min_stop_pct: 1.0
+    max_stop_pct: 12.0
+    pe_scenarios:
+      conservative: 12
+      base: 20
+      optimistic: 30
 
 risk:
   risk_per_trade_pct: 0.5

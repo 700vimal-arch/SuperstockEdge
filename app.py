@@ -1,4 +1,5 @@
 from __future__ import annotations
+import math
 import sys, yaml
 from pathlib import Path
 import pandas as pd
@@ -13,6 +14,8 @@ from data.market_data import fetch_ohlcv
 from engine.technicals import weekly_ohlcv, analyse_weekly, score_candidate
 from engine.fundamentals import quarterly_snapshot
 from engine.backtest import run_backtest
+from engine.magic_line import build_line
+from engine.entry_plan import build_trade_plan
 
 st.set_page_config(page_title="Superstock Edge", page_icon="📈", layout="wide")
 with open(ROOT / "config" / "settings.yaml", encoding="utf-8") as f:
@@ -24,7 +27,7 @@ st.markdown("""<style>
 .small-muted{color:#888;font-size:.82rem}
 </style>""", unsafe_allow_html=True)
 st.title("📈 Superstock Edge")
-st.caption("India + US · Swing + Long-term · Free-first research scanner · Version 0.2.0")
+st.caption("India + US · Swing + Long-term · Free-first research scanner · Version 0.3.1")
 st.warning(
     "Research prototype only. Yahoo Finance is best-effort, may be delayed, incomplete or unavailable, "
     "and is not a guaranteed live feed. This app does not provide investment advice or broker execution. "
@@ -49,7 +52,8 @@ with st.sidebar:
     period = st.selectbox("Historical price period", ["2y", "5y", "10y"], index=1)
     refresh = st.checkbox("Refresh downloaded data", value=False)
     st.caption("Symbols are editable in storage/watchlist.txt")
-    page = st.radio("Workspace", ["Market overview", "Discovery scanner", "Stock analysis", "Backtesting lab", "Watchlist & data"])
+    page = st.radio("Workspace", ["Market overview", "Discovery scanner", "Magic Line lab",
+                                   "Stock analysis", "Backtesting lab", "Watchlist & data"])
 
 symbols = load_symbols()
 if market == "India":
@@ -63,6 +67,125 @@ def load_symbol(sym, per, force):
     return fetch_ohlcv(sym, period=per, interval="1d", refresh=force)
 
 
+def fmt_num(value, digits=2):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    return f"{number:,.{digits}f}" if math.isfinite(number) else "N/A"
+
+
+def render_trade_plan(plan):
+    st.markdown("#### Entry, stop and target plan")
+    if not plan.get("actionable"):
+        reasons = plan.get("reasons") or ["No trade plan is available for this setup."]
+        st.info(" ".join(reasons))
+        return
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Entry zone", f"{fmt_num(plan['entry_zone_low'])}–{fmt_num(plan['entry_zone_high'])}")
+    c2.metric("Structural stop", fmt_num(plan["stop"]))
+    c3.metric("Primary target", fmt_num(plan["primary_target"]))
+    rr = plan.get("reward_risk")
+    c4.metric("Reward/risk", f"{rr:.2f}R" if rr is not None else "N/A")
+    st.caption(
+        f"{plan['setup_label']} — {plan['setup_reason']}  ·  "
+        f"Price vs reference {fmt_num(plan.get('distance_from_price_pct'))}%  ·  "
+        f"Risk {fmt_num(plan['risk_pct'])}% of entry  ·  "
+        f"{plan.get('reward_risk_band') or 'R/R unavailable'}"
+    )
+    if plan.get("annualized_eps") is not None:
+        st.caption(
+            f"Indicative annualized EPS {fmt_num(plan['annualized_eps'], 4)} · "
+            f"annualized P/E at the current price {fmt_num(plan.get('annualized_pe'))}. "
+            "Annualization is unsuitable for seasonal or one-off earnings."
+        )
+    st.markdown(f"**Stop rationale:** {plan['stop_reason']}")
+    stop_rows = [{
+        "Candidate": c["label"], "Level": c["level"], "Stop": c["stop"],
+        "Risk %": c["distance_pct"], "Risk (ATR)": c["distance_atr"],
+        "Selected": c["stop"] == plan["stop"],
+    } for c in plan.get("stop_candidates", [])]
+    if stop_rows:
+        st.dataframe(pd.DataFrame(stop_rows), use_container_width=True, hide_index=True)
+    target_rows = [{
+        "Target": t["label"], "Source": t["source"], "Price": t["value"],
+        "Upside %": t["upside_pct"], "R multiple": t["r_multiple"], "Below entry": t["below_entry"],
+    } for t in plan.get("targets", [])]
+    if target_rows:
+        st.dataframe(pd.DataFrame(target_rows), use_container_width=True, hide_index=True)
+    for warning in plan.get("warnings", []):
+        st.caption(f"Note: {warning}")
+
+
+def render_magic_lab(weekly, tech):
+    lab = tech.get("magic_line_lab") or {}
+    candidates = lab.get("candidates") or []
+    st.write(
+        f"Evaluated as of the completed week ending **{lab.get('as_of', 'N/A')}**. "
+        f"{len(candidates)} candidate averages tested using only outcomes observable at that date."
+    )
+    if lab.get("selected"):
+        current = lab.get("current") or {}
+        a, b, c, d = st.columns(4)
+        a.metric("Selected line", lab["selected"])
+        b.metric("Current line", fmt_num(current.get("value")))
+        c.metric("Distance from line", f"{fmt_num(current.get('distance_pct'))}%")
+        d.metric("4-week slope", f"{fmt_num(current.get('slope_pct_4w'))}%")
+        if lab.get("rationale"):
+            st.success(lab["rationale"])
+        elif lab.get("message"):
+            st.warning(lab["message"])
+        if current.get("breakdown"):
+            st.error("Price is below the breakdown buffer of the selected line.")
+        elif current.get("pending_test"):
+            st.info("The latest completed week is an unresolved support test.")
+    else:
+        st.warning(lab.get("message") or "No reliable Magic Line identified.")
+
+    rows = [{
+        "Line": c["name"], "Qualified": c["qualified"], "Score": c["score"],
+        "Tests": c["tests"], "Resolved": c["resolved_tests"], "Successes": c["successes"],
+        "Failures": c["failures"], "Open": c["open_tests"],
+        "Success %": c["success_rate_pct"], "Avg bounce %": c["avg_bounce_pct"],
+        "Avg recovery (w)": c["avg_recovery_weeks"],
+        "Max close deviation %": c["max_close_deviation_pct"],
+        "Breakdowns": c["confirmed_breakdowns"], "Weeks above %": c["trend_consistency_pct"],
+        "Current": c["current_value"], "Distance %": c["current_distance_pct"],
+        "Slope %": c["slope_pct_4w"], "Note": c["reason"],
+    } for c in candidates]
+    if rows:
+        st.markdown("#### Candidate comparison")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    selected = lab.get("selected_metrics") or {}
+    events = selected.get("events") or []
+    if events:
+        st.markdown("#### Historical support tests for the selected line")
+        event_rows = [{
+            "Week": e["date"], "Line": e["line"], "Low": e["low"], "Close": e["close"],
+            "Outcome": e["status"], "Bounce %": e["bounce_pct"],
+            "Recovery weeks": e["recovery_weeks"],
+        } for e in events]
+        st.dataframe(pd.DataFrame(event_rows), use_container_width=True, hide_index=True)
+
+    if weekly is not None and not weekly.empty and candidates:
+        fig = go.Figure(data=[go.Candlestick(
+            x=weekly.index, open=weekly.Open, high=weekly.High, low=weekly.Low,
+            close=weekly.Close, name="Confirmed weekly"
+        )])
+        for candidate in candidates:
+            is_selected = candidate["name"] == lab.get("selected")
+            fig.add_trace(go.Scatter(
+                x=weekly.index, y=build_line(weekly.Close, candidate["name"]),
+                name=candidate["name"],
+                line=dict(width=2.4 if is_selected else 1.1,
+                          dash="solid" if is_selected else "dot"),
+            ))
+        fig.update_layout(height=620, xaxis_rangeslider_visible=False,
+                          title="Weekly structure and candidate Magic Lines")
+        st.plotly_chart(fig, use_container_width=True)
+
+
 def scan_one(sym):
     d, meta = load_symbol(sym, period, refresh)
     if not isinstance(meta, dict):
@@ -73,7 +196,8 @@ def scan_one(sym):
     w = weekly_ohlcv(d)
     tech = analyse_weekly(w, CFG["scanner"])
     fund, fmeta = quarterly_snapshot(sym)
-    scores = score_candidate(tech, fund, CFG["scanner"])
+    plan = build_trade_plan(tech, fund, CFG["scanner"])
+    scores = score_candidate(tech, fund, CFG["scanner"], plan=plan)
     daily_close = float(d.Close.iloc[-1])
     daily_date = str(d.index[-1].date())
     magic = tech.get("magic_line")
@@ -95,6 +219,12 @@ def scan_one(sym):
         "weekly_magic_extension_pct": tech.get("magic_extension_pct"),
         "daily_magic_extension_pct": daily_magic_extension,
         "quiet_entry": tech.get("quiet"), "breakout": tech.get("breakout"),
+        "setup": plan.get("setup_label") if plan.get("actionable") else None,
+        "entry_zone": (f"{plan['entry_zone_low']:,.2f}–{plan['entry_zone_high']:,.2f}"
+                       if plan.get("entry_zone_low") is not None else None),
+        "stop_loss": plan.get("stop"),
+        "primary_target": plan.get("primary_target"),
+        "reward_risk": plan.get("reward_risk"),
         "classification": scores.get("classification"),
         "opportunity_score": scores.get("opportunity_score"),
         "fundamental_score": scores.get("fundamental_score"),
@@ -116,7 +246,8 @@ def render_scan_table(df, compact=False):
         "daily_close_adjusted", "daily_date", "confirmed_weekly_close", "confirmed_weekly_date",
         "base_valid", "base_weeks", "base_range_pct", "above_30w", "rising_30w",
         "magic_line_name", "magic_line", "weekly_magic_extension_pct",
-        "quiet_entry", "breakout", "eps_yoy_growth_pct", "revenue_yoy_growth_pct",
+        "quiet_entry", "breakout", "setup", "entry_zone", "stop_loss", "primary_target", "reward_risk",
+        "eps_yoy_growth_pct", "revenue_yoy_growth_pct",
         "fundamental_score", "technical_score", "entry_score", "data_coverage", "provider_status"
     ]
     cols = [c for c in preferred if c in df.columns]
@@ -131,8 +262,9 @@ if page == "Market overview":
     c3.metric("Mode", mode)
     st.markdown("### What this release evaluates")
     st.write("Variable-length weekly bases, 30-week trend, relative weekly volume, volatility contraction, "
-             "a configurable 10-week EMA/SMA or 20-week SMA Magic Line, quiet-entry proximity and exit warnings.")
-    st.write("Fundamental merit is scored separately from data coverage. The available provider snapshot is not point-in-time.")
+             "an automatically evaluated Magic Line, quiet-entry proximity, an entry/stop/target plan and exit warnings.")
+    st.write("Magic Line selection compares 10/20-week SMA/EMA candidates using outcomes observable at the "
+             "evaluation date. Fundamental merit is scored separately from data coverage.")
     if st.button("Run scan", type="primary"):
         rows, progress, status = [], st.progress(0), st.empty()
         for i, sym in enumerate(symbols):
@@ -174,6 +306,28 @@ elif page == "Discovery scanner":
         st.download_button("Download scan CSV", df.to_csv(index=False), "superstock_scan.csv", "text/csv")
 
 
+elif page == "Magic Line lab":
+    st.subheader("Magic Line laboratory")
+    st.caption("Candidate weekly averages are compared with historical outcomes known at the evaluation date.")
+    if not symbols:
+        st.info("No symbols in the selected market. Edit the watchlist.")
+    else:
+        symbol = st.selectbox("Select symbol", symbols, key="magic_lab_symbol")
+        with st.spinner(f"Loading {symbol}…"):
+            daily, meta = load_symbol(symbol, period, refresh)
+        if daily is None or daily.empty:
+            st.error(f"No usable OHLCV data: {meta.get('message', 'Unknown provider error')}")
+        else:
+            weekly = weekly_ohlcv(daily)
+            tech = analyse_weekly(weekly, CFG["scanner"])
+            if tech.get("ready"):
+                st.caption(f"Price source: {meta.get('source')} · Status: {meta.get('status')} · "
+                           f"Weekly candle: {tech.get('weekly_date')}")
+                render_magic_lab(weekly, tech)
+            else:
+                st.warning(tech.get("reason", "Insufficient confirmed weekly history."))
+
+
 elif page == "Stock analysis":
     st.subheader("Stock analysis")
     if not symbols:
@@ -188,7 +342,8 @@ elif page == "Stock analysis":
         else:
             weekly = weekly_ohlcv(daily)
             tech = analyse_weekly(weekly, CFG["scanner"])
-            scores = score_candidate(tech, fundamentals, CFG["scanner"])
+            plan = build_trade_plan(tech, fundamentals, CFG["scanner"])
+            scores = score_candidate(tech, fundamentals, CFG["scanner"], plan=plan)
             a, b, c, d = st.columns(4)
             a.metric("Latest daily adjusted close", f"{daily.Close.iloc[-1]:,.2f}")
             b.metric("Opportunity score", scores.get("opportunity_score", 0))
@@ -200,9 +355,10 @@ elif page == "Stock analysis":
             if tech.get("ready"):
                 st.write(f"**Classification:** {scores.get('classification')}  ·  "
                          f"**Base:** {'Valid' if tech.get('base_ok') else 'Not valid'} "
-                         f"({tech.get('base_weeks')} weeks, {tech.get('base_range_pct', float('nan')):.1f}% range)")
-                st.write(f"**Magic Line:** {tech.get('magic_line_name')} at {tech.get('magic_line', float('nan')):.2f} · "
-                         f"weekly extension {tech.get('magic_extension_pct', float('nan')):.2f}%")
+                         f"({tech.get('base_weeks')} weeks, {fmt_num(tech.get('base_range_pct'), 1)}% range)")
+                st.write(f"**Magic Line:** {tech.get('magic_line_name') or 'No reliable Magic Line identified'} "
+                         f"at {fmt_num(tech.get('magic_line'))} · "
+                         f"weekly extension {fmt_num(tech.get('magic_extension_pct'))}%")
                 fig = go.Figure(data=[go.Candlestick(
                     x=weekly.index, open=weekly.Open, high=weekly.High, low=weekly.Low,
                     close=weekly.Close, name="Confirmed weekly"
@@ -217,10 +373,11 @@ elif page == "Stock analysis":
                 fig.add_hline(y=tech["base_high"], line_dash="dot", annotation_text="Base high")
                 fig.update_layout(height=620, xaxis_rangeslider_visible=False, title=f"{symbol} — weekly chart")
                 st.plotly_chart(fig, use_container_width=True)
+                render_trade_plan(plan)
                 left, right = st.columns(2)
                 with left:
                     st.markdown("#### Technical structure")
-                    st.json({k: v for k, v in tech.items() if k != "weekly"})
+                    st.json({k: v for k, v in tech.items() if k not in ("weekly", "magic_line_lab")})
                 with right:
                     st.markdown("#### Fundamental snapshot")
                     st.json(fundamentals)
@@ -294,4 +451,4 @@ elif page == "Watchlist & data":
         st.success("Cache cleared.")
 
 st.divider()
-st.caption("Superstock Edge 0.2.0 · Paper/research only · No broker execution · Verify all prices, filings and corporate actions.")
+st.caption("Superstock Edge 0.3.1 · Paper/research only · No broker execution · Verify all prices, filings and corporate actions.")

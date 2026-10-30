@@ -27,7 +27,9 @@ def test_analysis_returns_insufficient_for_short_history():
 def test_analysis_has_expected_fields():
     result = analyse_weekly(weekly_ohlcv(sample_daily()))
     assert result["ready"] is True
-    assert result["magic_line_name"] == "10W EMA"
+    assert result["magic_line_name"] in {None, "10W SMA", "10W EMA", "20W SMA", "20W EMA"}
+    assert "magic_line_lab" in result
+    assert result["magic_line_lab"]["selected"] == result["magic_line_name"]
     assert 0 <= result["exit_risk_score"] <= 100
     assert "base_ok" in result
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .magic_line import evaluate_magic_lines
+
 
 def weekly_ohlcv(daily: pd.DataFrame) -> pd.DataFrame:
     """Aggregate daily bars to weeks; exclude an unfinished Mon-Thu week."""
@@ -61,15 +63,13 @@ def analyse_weekly(w: pd.DataFrame, cfg: dict | None = None) -> dict:
     above30 = bool(np.isfinite(ma30) and close > ma30)
     rising30 = bool(np.isfinite(ma30_prev4) and np.isfinite(ma30) and ma30 > ma30_prev4)
 
-    # A fixed, configurable Magic Line avoids choosing the best line using future outcomes.
-    magic_name = str(cfg.get("magic_line_method", "10W EMA"))
-    line_map = {"10W SMA": x.ma10, "10W EMA": x.ma10e, "20W SMA": x.ma20}
-    if magic_name not in line_map:
-        magic_name = "10W EMA"
-    line = line_map[magic_name]
-    magic_value = _safe_float(line.iloc[-1])
+    # Evaluate candidate lines with only outcomes observable at the last completed bar.
+    lab = evaluate_magic_lines(x, cfg)
+    magic_name = lab["selected"]
+    selected_metrics = lab.get("selected_metrics") or {}
+    magic_value = _safe_float(selected_metrics.get("current_value"))
     magic_extension = (close / magic_value - 1) * 100 if np.isfinite(magic_value) and magic_value > 0 else np.nan
-    magic_slope = ((float(line.iloc[-1]) / float(line.iloc[-5])) - 1) * 100 if len(x) >= 5 and pd.notna(line.iloc[-1]) and pd.notna(line.iloc[-5]) and float(line.iloc[-5]) != 0 else np.nan
+    magic_slope = _safe_float(selected_metrics.get("slope_pct_4w"))
 
     # Search historical windows ending before the current candle. Prefer the longest
     # window satisfying the configured range ceiling; this gives a variable base length.
@@ -110,21 +110,14 @@ def analyse_weekly(w: pd.DataFrame, cfg: dict | None = None) -> dict:
     breakout = bool(base_ok and close > base_high and np.isfinite(volume_multiple)
                     and volume_multiple >= float(cfg.get("volume_expansion_multiple", 2.0)))
 
-    # Count historical line interactions only; do not use them to select the line.
-    tests = successful = failed = 0
-    for i in range(20, len(x)-3):
-        lv = line.iloc[i]
-        if pd.isna(lv) or float(lv) <= 0:
-            continue
-        touched = abs(float(x.Low.iloc[i]) / float(lv) - 1) <= .025 and float(x.Close.iloc[i]) >= float(lv) * .985
-        if touched:
-            future = x.Close.iloc[i+1:i+4]
-            if len(future) == 3:
-                tests += 1
-                if float(future.max()) >= float(lv) * 1.03:
-                    successful += 1
-                else:
-                    failed += 1
+    magic_tests = {}
+    if magic_name:
+        magic_tests = {magic_name: {
+            "tests": selected_metrics.get("tests", 0),
+            "successful_tests": selected_metrics.get("successes", 0),
+            "failed_tests": selected_metrics.get("failures", 0),
+            "open_tests": selected_metrics.get("open_tests", 0),
+        }}
 
     runup_40w = (close / float(x.Close.iloc[-40]) - 1) * 100 if len(x) >= 40 and float(x.Close.iloc[-40]) > 0 else np.nan
     prior_ranges = (x.High - x.Low).iloc[-40:-1]
@@ -157,7 +150,7 @@ def analyse_weekly(w: pd.DataFrame, cfg: dict | None = None) -> dict:
         "magic_line_name": magic_name, "magic_line": magic_value if np.isfinite(magic_value) else None,
         "magic_extension_pct": magic_extension if np.isfinite(magic_extension) else None,
         "magic_slope_pct_4w": magic_slope if np.isfinite(magic_slope) else None,
-        "magic_tests": {magic_name: {"tests": tests, "successful_tests": successful, "failed_tests": failed}},
+        "magic_tests": magic_tests, "magic_line_lab": lab,
         "magic_breakdown": below_magic, "parabolic_warning": parabolic,
         "largest_weekly_range": biggest_range, "runup_40w_pct": runup_40w if np.isfinite(runup_40w) else None,
         "exit_risk_score": exit_score,
@@ -166,7 +159,8 @@ def analyse_weekly(w: pd.DataFrame, cfg: dict | None = None) -> dict:
     }
 
 
-def score_candidate(tech: dict, fundamentals: dict | None = None, cfg: dict | None = None) -> dict:
+def score_candidate(tech: dict, fundamentals: dict | None = None, cfg: dict | None = None,
+                    plan: dict | None = None) -> dict:
     """Return merit scores separately from data coverage and rule-based classification."""
     cfg = cfg or {}
     fundamentals = fundamentals if isinstance(fundamentals, dict) else {}
@@ -216,14 +210,15 @@ def score_candidate(tech: dict, fundamentals: dict | None = None, cfg: dict | No
     ext = _safe_float(tech.get("magic_extension_pct"))
     escore += 5 if np.isfinite(ext) and -5 <= ext <= 15 else 0
     escore += 5 if tech.get("base_ok") and not tech.get("breakout") else 0
-    rr = None
-    close, low, atrv = _safe_float(tech.get("close")), _safe_float(tech.get("base_low")), _safe_float(tech.get("atr14"), 0)
-    if np.isfinite(close) and np.isfinite(low):
-        stop = min(low, close - 2 * (atrv if np.isfinite(atrv) else 0))
-        risk = close - stop
-        target = _safe_float(tech.get("base_high"))
-        rr = ((target - close) / risk) if np.isfinite(target) and risk > 0 and target > close else None
-    escore += 5 if rr is not None and rr >= 2 else 0
+    rr = _safe_float(plan.get("reward_risk")) if isinstance(plan, dict) else np.nan
+    if not np.isfinite(rr):
+        close, low, atrv = _safe_float(tech.get("close")), _safe_float(tech.get("base_low")), _safe_float(tech.get("atr14"), 0)
+        if np.isfinite(close) and np.isfinite(low):
+            stop = min(low, close - 2 * (atrv if np.isfinite(atrv) else 0))
+            risk = close - stop
+            target = _safe_float(tech.get("base_high"))
+            rr = ((target - close) / risk) if np.isfinite(target) and risk > 0 and target > close else None
+    escore += 5 if rr is not None and np.isfinite(rr) and rr >= 2 else 0
 
     total = min(100, fscore + tscore + escore)
     available = sum(v != "Missing" for v in checks.values())
